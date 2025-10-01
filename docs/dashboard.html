@@ -1,0 +1,394 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>OSM Scraper Dashboard</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 24px; }
+    h1 { margin: 0 0 12px; }
+    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; margin-top: 12px; }
+    .card { border: 1px solid #e5e7eb; border-radius: 12px; padding: 12px; }
+    .label { color: #6b7280; font-size: 12px; margin-bottom: 6px; text-transform: uppercase; letter-spacing: .04em; }
+    .value { font-size: 24px; font-weight: 600; }
+    .bar { height: 10px; background: #e5e7eb; border-radius: 999px; overflow: hidden; }
+    .bar > div { height: 100%; background: #10b981; width: 0%; transition: width .3s ease; }
+    table { width: 100%; border-collapse: collapse; margin-top: 16px; }
+    th, td { padding: 8px 10px; border-bottom: 1px solid #f3f4f6; text-align: left; font-size: 14px; }
+    .muted { color: #6b7280; }
+    .ok { color: #10b981; }
+    .warn { color: #ef4444; }
+    .grid { display: grid; gap: 24px; grid-template-columns: 1fr; }
+    @media (min-width: 900px) { .grid { grid-template-columns: 2fr 3fr; } }
+    code { background: #f9fafb; padding: 2px 6px; border-radius: 6px; }
+  </style>
+    <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+    crossorigin=""
+    />
+    <script
+    src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+    integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+    crossorigin=""
+    ></script>
+    <style>
+    #map { height: 280px; border-radius: 8px; margin: 8px 0; }
+    </style>
+</head>
+<body>
+  <h1>OSM Scraper Dashboard</h1>
+  <div>Reading <code>dash_stats.json</code> every 2s…</div>
+
+  <div class="cards">
+    <div class="card">
+      <div class="label">Tiles</div>
+      <div class="value" id="tiles">—</div>
+      <div class="bar" style="margin-top:10px;"><div id="bar"></div></div>
+    </div>
+    <div class="card">
+      <div class="label">Businesses Kept</div>
+      <div class="value" id="kept">—</div>
+    </div>
+    <div class="card">
+      <div class="label">Speed</div>
+      <div class="value"><span id="rate">—</span> <span class="muted">rows/sec</span></div>
+    </div>
+    <div class="card">
+      <div class="label">Elapsed</div>
+      <div class="value"><span id="elapsed">—</span> <span class="muted">sec</span></div>
+    </div>
+  </div>
+
+  <h2 style="margin-top:24px;">Last Examples</h2>
+  <table>
+    <thead>
+      <tr><th>Name</th><th>City</th><th>State</th><th>Website</th></tr>
+    </thead>
+    <tbody id="examples">
+      <tr><td colspan="4" class="muted">Waiting for data…</td></tr>
+    </tbody>
+  </table>
+    <h3>Live Map</h3>
+    <div id="map"></div>
+    <h2 style="margin-top:24px;">Enrichment</h2>
+<div class="cards" id="enrich-cards">
+  <div class="card">
+    <div class="label">Enriched</div>
+    <div class="value" id="enrich-written">—</div>
+  </div>
+  <div class="card">
+    <div class="label">Row Rate</div>
+    <div class="value"><span id="enrich-rate">—</span> <span class="muted">rows/sec</span></div>
+  </div>
+  <div class="card">
+    <div class="label">Timeouts</div>
+    <div class="value" id="enrich-timeouts">—</div>
+  </div>
+  <div class="card">
+    <div class="label">Budget Exhausted</div>
+    <div class="value" id="enrich-budgets">—</div>
+  </div>
+  <div class="card">
+    <div class="label">Errors</div>
+    <div class="value" id="enrich-errors">—</div>
+  </div>
+</div>
+
+<table style="margin-top:12px;">
+  <thead><tr><th>Last Update</th><th>Status</th><th>Website</th><th>Note</th></tr></thead>
+  <tbody id="enrich-last">
+    <tr><td colspan="4" class="muted">Waiting for <code>enrich_stats.json</code>…</td></tr>
+  </tbody>
+</table>
+
+    <script>
+        // ===================== Tiny status line =====================
+        const statusEl = document.createElement('div');
+        statusEl.style.cssText = 'margin:6px 0;color:#6b7280;font-size:12px';
+        statusEl.id = 'status';
+        statusEl.textContent = 'Waiting for dash_stats.json…';
+        document.getElementById('map').insertAdjacentElement('beforebegin', statusEl);
+        
+        // ===================== Sticky view helpers =====================
+        const VIEW_KEY = "osm_dash:lastView";
+        
+        function saveView(map) {
+          const c = map.getCenter();
+          const z = map.getZoom();
+          const v = { lat: +c.lat.toFixed(6), lng: +c.lng.toFixed(6), z };
+          location.hash = `#${v.lat},${v.lng},${v.z}`;
+          try { localStorage.setItem(VIEW_KEY, JSON.stringify(v)); } catch {}
+        }
+        
+        function restoreViewFromHash() {
+          const m = location.hash.match(/^#(-?\d+\.?\d*),(-?\d+\.?\d*),(\d{1,2})$/);
+          if (!m) return null;
+          const lat = parseFloat(m[1]), lng = parseFloat(m[2]), z = parseInt(m[3], 10);
+          if (!isFinite(lat) || !isFinite(lng) || !isFinite(z)) return null;
+          return { lat, lng, z };
+        }
+        
+        function restoreViewFromStorage() {
+          try {
+            const v = JSON.parse(localStorage.getItem(VIEW_KEY) || "null");
+            if (!v) return null;
+            const lat = +v.lat, lng = +v.lng, z = +v.z;
+            if (!isFinite(lat) || !isFinite(lng) || !isFinite(z)) return null;
+            return { lat, lng, z };
+          } catch { return null; }
+        }
+        
+        function almostEqualBounds(a, b) {
+          if (!a || !b) return false;
+          const t = 1e-6;
+          return Math.abs(a.getSouth() - b.getSouth()) < t &&
+                 Math.abs(a.getWest()  - b.getWest())  < t &&
+                 Math.abs(a.getNorth() - b.getNorth()) < t &&
+                 Math.abs(a.getEast()  - b.getEast())  < t;
+        }
+        
+        // ===================== Map init =====================
+        const map = L.map('map', { zoomControl: false, attributionControl: true });
+        
+        let restoredView = false;
+        const hv = restoreViewFromHash();
+        if (hv) {
+          map.setView([hv.lat, hv.lng], hv.z);
+          restoredView = true;
+        } else {
+          const sv = restoreViewFromStorage();
+          if (sv) {
+            map.setView([sv.lat, sv.lng], sv.z);
+            restoredView = true;
+          } else {
+            map.setView([39.5, -98.35], 4); // fallback default (CONUS)
+          }
+        }
+        
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+          maxZoom: 18,
+          attribution: '&copy; OpenStreetMap contributors'
+        }).addTo(map);
+        
+        map.on('moveend', () => saveView(map));
+        map.on('zoomend', () => saveView(map));
+        
+        // ===================== Robust bbox parsing =====================
+        function coerceNum(x) {
+          const n = typeof x === 'string' ? parseFloat(x) : +x;
+          return isFinite(n) ? n : NaN;
+        }
+        
+        function getBoundsFromStats(stats) {
+            if (!stats) return null;
+
+            // A) If backend provides a bbox in any supported shape, use it first:
+            const candidates = [
+                stats.bbox,
+                stats.current_bbox,
+                stats.tile_bbox,
+                stats.query_bbox,
+                stats.tiles && stats.tiles.bbox,
+                stats.overpass && stats.overpass.bbox,
+                Array.isArray(stats) ? stats : null,
+            ].filter(Boolean);
+
+            const coerceNum = x => {
+                const n = typeof x === 'string' ? parseFloat(x) : +x;
+                return Number.isFinite(n) ? n : NaN;
+            };
+
+            for (const c of candidates) {
+                if (!c) continue;
+                // {s,w,n,e}
+                if (c.s != null && c.w != null && c.n != null && c.e != null) {
+                const s = coerceNum(c.s), w = coerceNum(c.w), n = coerceNum(c.n), e = coerceNum(c.e);
+                if ([s,w,n,e].every(Number.isFinite) && n > s && e > w) return L.latLngBounds([[s,w],[n,e]]);
+                }
+                // {south,west,north,east}
+                if (c.south != null && c.west != null && c.north != null && c.east != null) {
+                const s = coerceNum(c.south), w = coerceNum(c.west), n = coerceNum(c.north), e = coerceNum(c.east);
+                if ([s,w,n,e].every(Number.isFinite) && n > s && e > w) return L.latLngBounds([[s,w],[n,e]]);
+                }
+                // [s,w,n,e]
+                if (Array.isArray(c) && c.length >= 4) {
+                const s = coerceNum(c[0]), w = coerceNum(c[1]), n = coerceNum(c[2]), e = coerceNum(c[3]);
+                if ([s,w,n,e].every(Number.isFinite) && n > s && e > w) return L.latLngBounds([[s,w],[n,e]]);
+                }
+            }
+
+            // B) Fallback: derive bounds from last_examples lat/lon
+            const ex = Array.isArray(stats.last_examples) ? stats.last_examples : [];
+            let sMin = +Infinity, wMin = +Infinity, nMax = -Infinity, eMax = -Infinity;
+            for (const r of ex) {
+                const lat = coerceNum(r.lat), lon = coerceNum(r.lon);
+                if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+                if (lat < sMin) sMin = lat;
+                if (lon < wMin) wMin = lon;
+                if (lat > nMax) nMax = lat;
+                if (lon > eMax) eMax = lon;
+            }
+            if (Number.isFinite(sMin) && Number.isFinite(wMin) && Number.isFinite(nMax) && Number.isFinite(eMax) && nMax > sMin && eMax > wMin) {
+                return L.latLngBounds([[sMin, wMin], [nMax, eMax]]);
+            }
+
+            return null;
+            }
+
+        
+            function getCenterFromStats(stats, bounds) {
+                const coerceNum = x => (typeof x === 'string' ? parseFloat(x) : +x);
+
+                // Prefer explicit center if present
+                let lat = stats?.center?.lat, lon = stats?.center?.lon;
+                lat = coerceNum(lat); lon = coerceNum(lon);
+                if (Number.isFinite(lat) && Number.isFinite(lon)) return [lat, lon];
+
+                // Otherwise, try first valid example point
+                const ex = Array.isArray(stats.last_examples) ? stats.last_examples : [];
+                for (const r of ex) {
+                    const la = coerceNum(r.lat), lo = coerceNum(r.lon);
+                    if (Number.isFinite(la) && Number.isFinite(lo)) return [la, lo];
+                }
+
+                // Fallback to bounds center
+                const c = bounds.getCenter();
+                return [c.lat, c.lng];
+                }
+
+        
+        // ===================== Live bbox overlays =====================
+        let bboxRect = null;
+        let centerPin = null;
+        let lastTilesDone = null;
+        let lastBbox = null;
+        
+        function updateMapFromStats(stats) {
+          const bounds = getBoundsFromStats(stats);
+          if (!bounds) {
+            console.warn('No/invalid bbox in stats:', stats?.bbox);
+            statusEl.textContent = 'Waiting for bbox…';
+            return;
+          }
+        
+          // draw/update rectangle
+          if (!bboxRect) {
+            bboxRect = L.rectangle(bounds, { weight: 2, fillOpacity: 0.06 });
+            bboxRect.addTo(map);
+          } else {
+            bboxRect.setBounds(bounds);
+          }
+        
+          // center pin
+          const [lat, lon] = getCenterFromStats(stats, bounds);
+          if (!centerPin) {
+            centerPin = L.circleMarker([lat, lon], { radius: 5 });
+            centerPin.addTo(map);
+          } else {
+            centerPin.setLatLng([lat, lon]);
+          }
+        
+          const tileChanged = (stats.tiles_done !== lastTilesDone);
+          const bboxChanged = !almostEqualBounds(bounds, lastBbox);
+        
+          // Follow first valid data if no view restored; also follow real bbox changes.
+          if ((!restoredView && !lastBbox) || bboxChanged || tileChanged) {
+            map.fitBounds(bounds, { padding: [20,20], maxZoom: 14, animate: true });
+            saveView(map);
+          }
+        
+          lastTilesDone = stats.tiles_done;
+          lastBbox = bounds;
+        
+          statusEl.textContent = `bbox: ${bounds.getSouth().toFixed(4)},${bounds.getWest().toFixed(4)} → ${bounds.getNorth().toFixed(4)},${bounds.getEast().toFixed(4)}  • tiles_done: ${stats.tiles_done ?? '—'}`;
+        }
+        
+        // ===================== Stats polling + UI updates =====================
+        async function loadStats() {
+          try {
+            const res = await fetch('./dash_stats.json?_=' + Date.now(), { cache: 'no-store' });
+            if (!res.ok) throw new Error('HTTP ' + res.status);
+            const j = await res.json();
+        
+            // ---- counters/progress ----
+            const tilesText = `${j.tiles_done ?? 0} / ${j.tiles_total ?? 0}`;
+            const pct = Math.max(0, Math.min(100, Math.round(((j.tiles_done ?? 0) / Math.max(1, (j.tiles_total ?? 0))) * 100)));
+            document.getElementById('tiles').textContent = tilesText + ` (${pct}%)`;
+            document.getElementById('bar').style.width = pct + '%';
+            document.getElementById('kept').textContent = j.kept_total ?? '0';
+            document.getElementById('rate').textContent = (j.rate_rows_per_sec ?? 0).toFixed(2);
+            document.getElementById('elapsed').textContent = (j.elapsed_sec ?? 0).toFixed(1);
+        
+            // ---- examples table ----
+            const tb = document.getElementById('examples');
+            tb.innerHTML = '';
+            const list = j.last_examples || [];
+            if (!list.length) {
+              tb.innerHTML = '<tr><td colspan="4" class="muted">No examples yet…</td></tr>';
+            } else {
+              for (const r of list) {
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
+                  <td>${(r.name||'').replace(/</g,'&lt;')}</td>
+                  <td>${(r.city||'').replace(/</g,'&lt;')}</td>
+                  <td>${(r.state||'').replace(/</g,'&lt;')}</td>
+                  <td>${r.website ? `<a href="${r.website}" target="_blank">link</a>` : '<span class="muted">—</span>'}</td>
+                `;
+                tb.appendChild(tr);
+              }
+            }
+        
+            // ---- map follow ----
+            updateMapFromStats(j);
+          } catch (e) {
+            console.error('loadStats error:', e);
+            statusEl.textContent = 'Error reading dash_stats.json (see console).';
+          }
+        }
+        
+        loadStats();
+        setInterval(loadStats, 2000);
+        </script>
+        <script>
+            // ----- Enrichment stats polling -----
+            async function pollEnrich() {
+              try {
+                const res = await fetch('./enrich_stats.json?_=' + Date.now(), { cache: 'no-store' });
+                if (!res.ok) throw new Error('HTTP ' + res.status);
+                const s = await res.json();
+            
+                // Cards
+                document.getElementById('enrich-written').textContent = s.written ?? '0';
+                document.getElementById('enrich-rate').textContent = (s.rate_rows_per_sec ?? 0).toFixed(2);
+                document.getElementById('enrich-timeouts').textContent = s.timeouts ?? 0;
+                document.getElementById('enrich-budgets').textContent = (s.fetch_budget_exhausted ?? s.budgets ?? 0);
+                document.getElementById('enrich-errors').textContent = s.errors ?? 0;
+            
+                // Last event row
+                const ts = s.last_updated ? new Date(s.last_updated * 1000) : null;
+                const when = ts ? ts.toLocaleTimeString() : '—';
+                const status = s.last_status || '—';
+                const site = s.last_site || '';
+                const note = s.last_note || s.last_notes || '';
+                const tb = document.getElementById('enrich-last');
+                tb.innerHTML = `
+                  <tr>
+                    <td>${when}</td>
+                    <td class="${/timeout|error/i.test(status) ? 'warn' : 'ok'}">${status}</td>
+                    <td>${site ? `<a href="${site}" target="_blank">link</a>` : '<span class="muted">—</span>'}</td>
+                    <td>${(note || '').replace(/</g,'&lt;').slice(0,160)}</td>
+                  </tr>`;
+              } catch (e) {
+                // ignore until file exists / is being written
+              }
+            }
+            
+            pollEnrich();
+            setInterval(pollEnrich, 2000);
+            </script>
+            
+        
+        
+</body>
+</html>

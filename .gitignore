@@ -1,0 +1,25 @@
+cat > .gitignore <<'EOF'
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+
+# Data: keep only tiny samples
+CSV/
+scraped_data/
+data/bulk/
+*.csv
+!data/sample/*.csv
+*.numbers
+
+# Caches & artifacts
+*cache*.json
+*_cache.json
+nominatim_cache.json
+enrich_stats.json
+dash_stats.json
+
+# OS
+.DS_Store
+EOF
